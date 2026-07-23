@@ -1,0 +1,25 @@
+{
+  "name": "bot-template",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun ./dist/src/index.js",
+    "build": "tsc -p tsconfig.json",
+    "dev": "nodemon -e ts -x \"bun ./src/index.ts\"",
+    "initialize": "bun initialize.js"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20.12.12",
+    "colors": "^1.4.0",
+    "nodemon": "^3.1.14",
+    "ora": "^9.4.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  }
+}
