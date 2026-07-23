@@ -3,6 +3,9 @@ import type { Environment } from './src/types';
 const env: Environment = {
     "token": "your-token",
     "app_id": "your-app-id",
+    "environments": {
+        "SAMPLE_VALUE": "sample"
+    },
     "clientOptions": {
         "intents": [
             "Guilds",

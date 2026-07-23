@@ -4,5 +4,7 @@ export type Environment = {
     "token": string;
     "app_id": string;
     "clientOptions": ClientOptions;
-    "restOptions"?: Partial<RESTOptions>
+    "restOptions"?: Partial<RESTOptions>,
+    "environments"?: Record<string, string>
 };
+
