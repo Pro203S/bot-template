@@ -313,6 +313,8 @@ const readLine = (q) => new Promise(r => line.question(`${chalk.cyan(chalk.bold(
 
         rm("initialize.js");
 
+        fs.renameSync("discord-env.example.ts", "discord-env.ts");
+
         console.log("\r\nInitialized the project!");
     } catch (err) {
         spinner.fail(err.message);
