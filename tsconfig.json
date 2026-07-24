@@ -8,7 +8,11 @@
     "allowJs": true,
     "rootDir": ".",
     "types": ["node"],
-    "outDir": "./dist"
+    "outDir": "./dist",
+    "paths": {
+      "@/*": ["./src/*"],
+      "types": ["./src/types"]
+    }
   },
   "include": ["./src/**/*.ts", "discord-env.example.ts", "./declarations.d.ts"],
   "exclude": ["./initialize.js", "./dist/**/*"]

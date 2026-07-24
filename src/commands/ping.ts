@@ -1,9 +1,12 @@
-import type { CommandModule } from "../types";
+import type { CommandModule } from "types";
 
 const command: CommandModule = [
     "slash",
-    (params) => {
-
+    {
+        "description": "퐁"
+    },
+    async ({ interaction }) => {
+        
     }
 ];
 

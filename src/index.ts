@@ -4,7 +4,7 @@ import fs from 'fs';
 import fsP from 'fs/promises';
 import { Client, REST, type ClientEvents } from 'discord.js';
 import path from 'path';
-import type { EventModule } from './types';
+import type { CommandModule, EventModule } from './types';
 
 const handleError = (err: unknown) => {
     if (err instanceof Error) {
@@ -39,6 +39,7 @@ const handleError = (err: unknown) => {
             spinner.succeed("Logged in as " + `${cli.user.username}#${cli.user.discriminator}`.white.bold);
         });
 
+        await client.login(env.token);
         const cli = await new Promise<Client<true>>(r => client.once("clientReady", r));
 
         spinner.start("Loading commands...");
@@ -60,6 +61,11 @@ const handleError = (err: unknown) => {
                 "once"?: boolean
             } = await import(`./events/${path.basename(eventModule.name)}`);
 
+            if (!module.default) {
+                console.error(`${eventModule}: Expected the default export to be an EventModule tuple.`.red);
+                continue;
+            }
+
             const listener = (...args: ClientEvents[keyof ClientEvents]) => {
                 module.default[1]({
                     "client": cli,
@@ -71,8 +77,6 @@ const handleError = (err: unknown) => {
 
             client[module.once ? "once" : "on"](module.default[0], listener);
         }
-
-        await client.login(env.token);
     } catch (e) {
         spinner.stop();
         handleError(e);
