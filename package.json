@@ -6,7 +6,7 @@
   "scripts": {
     "start": "bun ./dist/src/index.js",
     "build": "tsc -p tsconfig.json",
-    "dev": "nodemon -e ts -x \"bun ./src/index.ts\"",
+    "dev": "nodemon -e ts -x \"bun ./src/index.ts dev\"",
     "initialize": "bun initialize.js"
   },
   "devDependencies": {
@@ -20,6 +20,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "discord.js": "^14.27.0"
+    "discord.js": "^14.27.0",
+    "wildcard-match": "^5.1.4"
   }
 }
