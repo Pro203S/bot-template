@@ -294,12 +294,7 @@ const readLine = (q) => new Promise(r => line.question(`${chalk.cyan(chalk.bold(
         const discordJsLatestVersion = await UpdateDiscordJS();
         spinner.succeed("Updated discord.js to " + chalk.bold(discordJsLatestVersion));
 
-        spinner.start("Initializing git...");
-        rm(".git", { "recursive": true, "force": true });
-        await execFileAsync("git", ["init"]);
-        spinner.succeed("Initialized git.");
-        await execFileAsync("git", ["add", "*"]);
-        await execFileAsync("git", ["commit", "-m", "Initial Commit"]);
+        spinner.start("Setting up some magic...");
 
         fs.renameSync("README.md", "GUIDE.md");
 
@@ -316,6 +311,15 @@ const readLine = (q) => new Promise(r => line.question(`${chalk.cyan(chalk.bold(
         rm("initialize.js");
 
         fs.renameSync("discord-env.example.ts", "discord-env.ts");
+
+        spinner.succeed("Magic complete!");
+
+        spinner.start("Initializing git...");
+        rm(".git", { "recursive": true, "force": true });
+        await execFileAsync("git", ["init"]);
+        spinner.succeed("Initialized git.");
+        await execFileAsync("git", ["add", "*"]);
+        await execFileAsync("git", ["commit", "-m", "Initial Commit"]);
 
         console.log("\r\nInitialized the project!");
     } catch (err) {
