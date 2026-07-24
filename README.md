@@ -1,5 +1,6 @@
 # bot-template
 
+[GitHub에서 보기](https://github.com/Pro203S/bot-template/blob/main/README.md)
 [discord.js](https://discord.js.org/)와 Bun, TypeScript 기반 디스코드 봇 템플릿
 
 ## 주요 기능
