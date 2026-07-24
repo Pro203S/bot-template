@@ -2,9 +2,9 @@ import 'colors';
 import ora from 'ora';
 import fs from 'fs';
 import fsP from 'fs/promises';
-import { ApplicationCommandOptionType, ApplicationCommandType, Client, REST, Routes, type ClientEvents } from 'discord.js';
+import { ApplicationCommandOptionType, ApplicationCommandType, Client, REST, Routes, type ClientEvents, type Interaction } from 'discord.js';
 import path from 'path';
-import type { CommandModule, EventModule } from './types';
+import type { CommandModule, EventModule, InteractionModule } from './types';
 
 if (process.argv[2] === "dev")
     (process.env as any).IS_DEV = "true";
@@ -20,6 +20,34 @@ const handleError = (err: unknown) => {
     console.error(String(err).red);
     process.exit(1);
 };
+
+const isSourceModule = (fileName: string) =>
+    /\.[cm]?[jt]s$/.test(fileName) && !fileName.endsWith(".d.ts");
+
+const readSourceModulePaths = async (directory: string): Promise<string[]> => {
+    const entries = await fsP.readdir(directory, { "withFileTypes": true, "encoding": "utf-8" });
+    const modulePaths = await Promise.all(entries.map(async entry => {
+        const entryPath = path.join(directory, entry.name);
+        if (entry.isDirectory()) return readSourceModulePaths(entryPath);
+        if (entry.isFile() && isSourceModule(entry.name)) return [entryPath];
+        return [];
+    }));
+
+    return modulePaths.flat().sort((a, b) => a.localeCompare(b));
+};
+
+const getSourceFingerprint = async (directory: string) => {
+    const modulePaths = await readSourceModulePaths(directory);
+    const sources = await Promise.all(modulePaths.map(async modulePath => [
+        path.relative(directory, modulePath).split(path.sep).join("/"),
+        await fsP.readFile(modulePath, "utf-8")
+    ]));
+
+    return JSON.stringify(sources);
+};
+
+const getSourceImportPath = (modulePath: string, cacheKey: number) =>
+    `./${path.relative("./src", modulePath).split(path.sep).join("/")}?update=${cacheKey}`;
 
 (async () => {
     const now = Date.now();
@@ -42,6 +70,24 @@ const handleError = (err: unknown) => {
         await client.login(env.token);
         const cli = await new Promise<Client<true>>(r => client.once("clientReady", r));
 
+        let hotReloadQueue = Promise.resolve();
+        const hotReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+        const watchForHotReload = (directory: string, label: string, reload: () => Promise<void>) => {
+            if (process.env.IS_DEV !== "true") return;
+
+            fs.watch(directory, { "recursive": true }, (_, fileName) => {
+                if (fileName && !isSourceModule(fileName)) return;
+
+                clearTimeout(hotReloadTimers.get(directory));
+                hotReloadTimers.set(directory, setTimeout(() => {
+                    hotReloadQueue = hotReloadQueue
+                        .then(reload)
+                        .catch(error => console.error((`Failed to reload ${label}: ` + String(error)).red));
+                }, 150));
+            });
+        };
+
         if (fs.existsSync("./src/commands")) {
             type LoadedCommand = {
                 parts: string[];
@@ -60,18 +106,20 @@ const handleError = (err: unknown) => {
                 "attachment": ApplicationCommandOptionType.Attachment
             };
 
-            const readCommands = async (directory: string, parts: string[] = []): Promise<LoadedCommand[]> => {
+            const readCommands = async (directory: string, cacheKey: number, parts: string[] = []): Promise<LoadedCommand[]> => {
                 const entries = await fsP.readdir(directory, { "withFileTypes": true, "encoding": "utf-8" });
+                entries.sort((a, b) => a.name.localeCompare(b.name));
+
                 const loaded = await Promise.all(entries.map(async entry => {
                     if (entry.isDirectory())
-                        return readCommands(path.join(directory, entry.name), [...parts, entry.name]);
+                        return readCommands(path.join(directory, entry.name), cacheKey, [...parts, entry.name]);
 
                     if (!entry.isFile() || !/\.[cm]?[jt]s$/.test(entry.name) || entry.name.endsWith(".d.ts"))
                         return [];
 
                     const name = entry.name.replace(/\.[cm]?[jt]s$/, "");
                     const module: { "default"?: CommandModule } = await import(
-                        `./commands/${[...parts, entry.name].join("/")}`
+                        `./commands/${[...parts, entry.name].join("/")}?update=${cacheKey}`
                     );
 
                     if (!module.default) {
@@ -107,94 +155,139 @@ const handleError = (err: unknown) => {
                 });
             };
 
-            const loadedCommands = await readCommands("./src/commands");
-            const registeredCommands = new Map<string, Record<string, unknown>>();
-            const handlers = new Map<string, CommandModule[2]>();
+            const buildCommandState = async () => {
+                const loadedCommands = await readCommands("./src/commands", Date.now());
+                const registeredCommands = new Map<string, Record<string, unknown>>();
+                const nextHandlers = new Map<string, CommandModule[2]>();
 
-            for (const loaded of loadedCommands) {
-                const [commandName, groupOrSubcommand, subcommand] = loaded.parts;
-                const command = loaded.command;
+                for (const loaded of loadedCommands) {
+                    const [commandName, groupOrSubcommand, subcommand] = loaded.parts;
+                    const command = loaded.command;
 
-                if (loaded.parts.length === 1) {
-                    const body: Record<string, unknown> = { "name": commandName };
+                    if (loaded.parts.length === 1) {
+                        const body: Record<string, unknown> = { "name": commandName };
 
-                    switch (command[0]) {
-                        case "slash":
-                            body.type = ApplicationCommandType.ChatInput;
-                            body.description = command[1].description;
-                            body.options = serializeArguments(command);
-                            break;
-                        case "messageContextMenu":
-                            body.type = ApplicationCommandType.Message;
-                            break;
-                        case "userContextMenu":
-                            body.type = ApplicationCommandType.User;
-                            break;
-                        case "primaryEntry":
-                            body.type = ApplicationCommandType.PrimaryEntryPoint;
-                            if ("handler" in command[1]) body.handler = command[1].handler;
-                            break;
+                        switch (command[0]) {
+                            case "slash":
+                                body.type = ApplicationCommandType.ChatInput;
+                                body.description = command[1].description;
+                                body.options = serializeArguments(command);
+                                break;
+                            case "messageContextMenu":
+                                body.type = ApplicationCommandType.Message;
+                                break;
+                            case "userContextMenu":
+                                body.type = ApplicationCommandType.User;
+                                break;
+                            case "primaryEntry":
+                                body.type = ApplicationCommandType.PrimaryEntryPoint;
+                                if ("handler" in command[1]) body.handler = command[1].handler;
+                                break;
+                        }
+
+                        registeredCommands.set(commandName, body);
+                        nextHandlers.set(commandName, command[2]);
+                        continue;
                     }
 
-                    registeredCommands.set(commandName, body);
-                    handlers.set(commandName, command[2]);
-                    continue;
-                }
+                    if (command[0] !== "slash" || loaded.parts.length > 3) {
+                        console.error(`${loaded.parts.join("/")}: Nested commands must be slash commands with at most one subcommand group.`.red);
+                        continue;
+                    }
 
-                if (command[0] !== "slash" || loaded.parts.length > 3) {
-                    console.error(`${loaded.parts.join("/")}: Nested commands must be slash commands with at most one subcommand group.`.red);
-                    continue;
-                }
-
-                let body = registeredCommands.get(commandName);
-                if (!body) {
-                    body = {
-                        "name": commandName,
-                        "type": ApplicationCommandType.ChatInput,
-                        "description": `${commandName} commands`,
-                        "options": []
-                    };
-                    registeredCommands.set(commandName, body);
-                }
-
-                const options = body.options as Record<string, unknown>[];
-                if (loaded.parts.length === 2) {
-                    options.push({
-                        "type": ApplicationCommandOptionType.Subcommand,
-                        "name": groupOrSubcommand,
-                        "description": command[1].description,
-                        "options": serializeArguments(command)
-                    });
-                } else {
-                    let group = options.find(option =>
-                        option.type === ApplicationCommandOptionType.SubcommandGroup &&
-                        option.name === groupOrSubcommand
-                    );
-
-                    if (!group) {
-                        group = {
-                            "type": ApplicationCommandOptionType.SubcommandGroup,
-                            "name": groupOrSubcommand,
-                            "description": `${groupOrSubcommand} commands`,
+                    let body = registeredCommands.get(commandName);
+                    if (!body) {
+                        body = {
+                            "name": commandName,
+                            "type": ApplicationCommandType.ChatInput,
+                            "description": `${commandName} commands`,
                             "options": []
                         };
-                        options.push(group);
+                        registeredCommands.set(commandName, body);
                     }
 
-                    (group.options as Record<string, unknown>[]).push({
-                        "type": ApplicationCommandOptionType.Subcommand,
-                        "name": subcommand,
-                        "description": command[1].description,
-                        "options": serializeArguments(command)
-                    });
+                    const options = body.options as Record<string, unknown>[];
+                    if (loaded.parts.length === 2) {
+                        options.push({
+                            "type": ApplicationCommandOptionType.Subcommand,
+                            "name": groupOrSubcommand,
+                            "description": command[1].description,
+                            "options": serializeArguments(command)
+                        });
+                    } else {
+                        let group = options.find(option =>
+                            option.type === ApplicationCommandOptionType.SubcommandGroup &&
+                            option.name === groupOrSubcommand
+                        );
+
+                        if (!group) {
+                            group = {
+                                "type": ApplicationCommandOptionType.SubcommandGroup,
+                                "name": groupOrSubcommand,
+                                "description": `${groupOrSubcommand} commands`,
+                                "options": []
+                            };
+                            options.push(group);
+                        }
+
+                        (group.options as Record<string, unknown>[]).push({
+                            "type": ApplicationCommandOptionType.Subcommand,
+                            "name": subcommand,
+                            "description": command[1].description,
+                            "options": serializeArguments(command)
+                        });
+                    }
+
+                    nextHandlers.set(loaded.parts.join("/"), command[2]);
                 }
 
-                handlers.set(loaded.parts.join("/"), command[2]);
-            }
+                return {
+                    "body": [...registeredCommands.values()],
+                    "handlers": nextHandlers,
+                    "info": loadedCommands.map(({ parts, command }) => ({
+                        parts,
+                        "type": command[0],
+                        "commandInfo": command[1]
+                    }))
+                };
+            };
 
-            await rest.put(Routes.applicationCommands(env.app_id), {
-                "body": [...registeredCommands.values()]
-            });
+            let handlers = new Map<string, CommandModule[2]>();
+            let registeredCommandInfo = "";
+            let commandSourceFingerprint = "";
+
+            const reloadCommands = async (forcePut = false) => {
+                const sourceFingerprint = await getSourceFingerprint("./src/commands");
+                if (!forcePut && sourceFingerprint === commandSourceFingerprint) return;
+
+                const state = await buildCommandState();
+                const commandInfo = JSON.stringify(state.info);
+                handlers = state.handlers;
+
+                if (!forcePut && commandInfo === registeredCommandInfo) {
+                    commandSourceFingerprint = sourceFingerprint;
+                    return;
+                }
+
+                const previousSpinnerText = spinner.text;
+                const wasSpinnerSpinning = spinner.isSpinning;
+                spinner.start(forcePut ? "Registering commands..." : "Reloading commands...");
+
+                try {
+                    await rest.put(Routes.applicationCommands(env.app_id), { "body": state.body });
+                    registeredCommandInfo = commandInfo;
+                    commandSourceFingerprint = sourceFingerprint;
+
+                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
+                    else spinner.succeed("Commands reloaded and registered.");
+                } catch (error) {
+                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
+                    else spinner.fail("Failed to reload commands.");
+                    throw error;
+                }
+            };
+
+            await reloadCommands(true);
 
             client.on("interactionCreate", interaction => {
                 if (!interaction.isCommand()) return;
@@ -210,72 +303,169 @@ const handleError = (err: unknown) => {
                 const handler = handlers.get(parts.join("/"));
                 if (handler) void handler({ "client": cli, rest, interaction } as never);
             });
+
+            watchForHotReload("./src/commands", "commands", () => reloadCommands());
         }
 
         if (fs.existsSync("./src/events")) {
-            const eventModules = await fsP.readdir("./src/events", { "withFileTypes": true, "encoding": "utf-8" });
+            type RegisteredEvent = {
+                "eventName": keyof ClientEvents;
+                "listener": (...args: any[]) => void;
+                "once": boolean;
+            };
 
-            for (const eventModule of eventModules) {
-                if (!eventModule.isFile()) {
-                    console.warn(`${eventModule} in the events folder is not a file.`.yellow);
-                    continue;
+            let registeredEvents: RegisteredEvent[] = [];
+            let eventSourceFingerprint = "";
+
+            const reloadEvents = async (initial = false) => {
+                const sourceFingerprint = await getSourceFingerprint("./src/events");
+                if (!initial && sourceFingerprint === eventSourceFingerprint) return;
+
+                const previousSpinnerText = spinner.text;
+                const wasSpinnerSpinning = spinner.isSpinning;
+                spinner.start(initial ? "Loading events..." : "Reloading events...");
+
+                try {
+                    const cacheKey = Date.now();
+                    const modulePaths = await readSourceModulePaths("./src/events");
+                    const nextEvents: RegisteredEvent[] = [];
+
+                    for (const modulePath of modulePaths) {
+                        const module: {
+                            "default"?: EventModule;
+                            "once"?: boolean;
+                        } = await import(getSourceImportPath(modulePath, cacheKey));
+
+                        if (!module.default)
+                            throw new Error(`${path.relative("./src/events", modulePath)}: Expected the default export to be an EventModule tuple.`);
+
+                        const eventModule = module.default;
+                        const eventName = eventModule[0];
+                        const listener = (...eventArgs: any[]) => eventModule[1]({
+                            "client": cli,
+                            rest,
+                            eventArgs,
+                            "removeListener": () => client.removeListener(eventName, listener as never)
+                        } as never);
+
+                        nextEvents.push({ eventName, listener, "once": module.once === true });
+                    }
+
+                    for (const event of registeredEvents)
+                        client.removeListener(event.eventName, event.listener as never);
+
+                    for (const event of nextEvents) {
+                        if (event.once) client.once(event.eventName, event.listener as never);
+                        else client.on(event.eventName, event.listener as never);
+                    }
+
+                    registeredEvents = nextEvents;
+                    eventSourceFingerprint = sourceFingerprint;
+
+                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
+                    else spinner.succeed("Events reloaded.");
+                } catch (error) {
+                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
+                    else spinner.fail("Failed to reload events.");
+                    throw error;
                 }
+            };
 
-                const module: {
-                    "default": EventModule,
-                    "once"?: boolean
-                } = await import(`./events/${path.basename(eventModule.name)}`);
-
-                if (!module.default) {
-                    console.error(`${eventModule}: Expected the default export to be an EventModule tuple.`.red);
-                    continue;
-                }
-
-                const listener = (...args: ClientEvents[keyof ClientEvents]) => module.default[1]({
-                    "client": cli,
-                    rest,
-                    "eventArgs": args,
-                    "removeListener": () => client.removeListener(module.default[0], listener)
-                });
-
-                client[module.once ? "once" : "on"](module.default[0], listener);
-            }
+            await reloadEvents(true);
+            watchForHotReload("./src/events", "events", () => reloadEvents());
         }
 
         if (fs.existsSync("./src/interactions")) {
-            const interactionModules = await fsP.readdir("./src/interactions", { "withFileTypes": true, "encoding": "utf-8" });
+            type RegisteredInteraction = {
+                "module": InteractionModule;
+                "once": boolean;
+            };
 
-            for (const interactionModule of interactionModules) {
-                if (!interactionModule.isFile()) {
-                    console.warn(`${interactionModule} in the interactions folder is not a file.`.yellow);
-                    continue;
+            let registeredInteractions = new Map<string, RegisteredInteraction>();
+            let interactionSourceFingerprint = "";
+
+            const reloadInteractions = async (initial = false) => {
+                const sourceFingerprint = await getSourceFingerprint("./src/interactions");
+                if (!initial && sourceFingerprint === interactionSourceFingerprint) return;
+
+                const previousSpinnerText = spinner.text;
+                const wasSpinnerSpinning = spinner.isSpinning;
+                spinner.start(initial ? "Loading interactions..." : "Reloading interactions...");
+
+                try {
+                    const cacheKey = Date.now();
+                    const modulePaths = await readSourceModulePaths("./src/interactions");
+                    const nextInteractions = new Map<string, RegisteredInteraction>();
+
+                    for (const modulePath of modulePaths) {
+                        const module: {
+                            "default"?: InteractionModule;
+                            "customId"?: string;
+                            "once"?: boolean;
+                        } = await import(getSourceImportPath(modulePath, cacheKey));
+
+                        const relativePath = path.relative("./src/interactions", modulePath);
+                        if (!module.default)
+                            throw new Error(`${relativePath}: Expected the default export to be an InteractionModule tuple.`);
+                        if (!module.customId)
+                            throw new Error(`${relativePath}: Interaction modules must export a customId string.`);
+
+                        const key = `${module.default[0]}:${module.customId}`;
+                        if (nextInteractions.has(key))
+                            throw new Error(`${relativePath}: Duplicate interaction key "${key}".`);
+
+                        nextInteractions.set(key, {
+                            "module": module.default,
+                            "once": module.once === true
+                        });
+                    }
+
+                    registeredInteractions = nextInteractions;
+                    interactionSourceFingerprint = sourceFingerprint;
+
+                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
+                    else spinner.succeed("Interactions reloaded.");
+                } catch (error) {
+                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
+                    else spinner.fail("Failed to reload interactions.");
+                    throw error;
                 }
+            };
 
-                const module: {
-                    "default": EventModule,
-                    "customId": string,
-                    "once"?: boolean
-                } = await import(`./events/${path.basename(interactionModule.name)}`);
+            await reloadInteractions(true);
 
-                if (!module.default) {
-                    console.error(`${interactionModule}: Expected the default export to be an InteractionModule tuple.`.red);
-                    continue;
-                }
+            client.on("interactionCreate", (interaction: Interaction) => {
+                let interactionType: InteractionModule[0] | undefined;
 
-                if (!module.customId) {
-                    console.error(`${interactionModule}: Interaction modules must export a customId string.`.red);
-                    continue;
-                }
+                if (interaction.isButton()) interactionType = "button";
+                else if (interaction.isAutocomplete()) interactionType = "autoComplete";
+                else if (interaction.isModalSubmit()) interactionType = "modalSubmit";
+                else if (interaction.isStringSelectMenu()) interactionType = "stringSelect";
+                else if (interaction.isRoleSelectMenu()) interactionType = "roleSelect";
+                else if (interaction.isMentionableSelectMenu()) interactionType = "mentionableSelect";
+                else if (interaction.isChannelSelectMenu()) interactionType = "channelSelect";
 
-                const listener = (...args: ClientEvents[keyof ClientEvents]) => module.default[1]({
+                if (!interactionType) return;
+
+                const interactionId = interaction.isAutocomplete()
+                    ? interaction.commandName
+                    : "customId" in interaction ? interaction.customId : undefined;
+                if (!interactionId) return;
+
+                const key = `${interactionType}:${interactionId}`;
+                const registeredInteraction = registeredInteractions.get(key);
+                if (!registeredInteraction) return;
+
+                if (registeredInteraction.once) registeredInteractions.delete(key);
+                void registeredInteraction.module[1]({
                     "client": cli,
                     rest,
-                    "eventArgs": args,
-                    "removeListener": () => client.removeListener(module.default[0], listener)
-                });
+                    "eventArgs": interaction,
+                    "removeListener": () => registeredInteractions.delete(key)
+                } as never);
+            });
 
-                client[module.once ? "once" : "on"](module.default[0], listener);
-            }
+            watchForHotReload("./src/interactions", "interactions", () => reloadInteractions());
         }
 
         spinner.succeed("Logged in as " + `${cli.user.username}#${cli.user.discriminator}`.white.bold + "!" + ` (${Date.now() - now}ms)`.dim);

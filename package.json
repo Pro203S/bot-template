@@ -4,9 +4,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun ./dist/src/index.js",
-    "build": "tsc -p tsconfig.json",
-    "dev": "nodemon -e ts -x \"bun ./src/index.ts dev\"",
+    "start": "bun src/index.ts",
+    "dev": "nodemon --watch src/modules --watch src/index.ts --watch src/types.ts -e \"ts,mts,cts,js,mjs,cjs,json\" -x \"bun ./src/index.ts dev\"",
     "initialize": "bun initialize.js"
   },
   "devDependencies": {
