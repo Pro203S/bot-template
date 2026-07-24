@@ -11,7 +11,8 @@
     "outDir": "./dist",
     "paths": {
       "@/*": ["./src/*"],
-      "types": ["./src/types"]
+      "types": ["./src/types"],
+      "modules/*": ["./src/modules/*"]
     }
   },
   "include": ["./src/**/*.ts", "discord-env.example.ts", "./declarations.d.ts"],
