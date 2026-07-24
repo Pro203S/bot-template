@@ -4,6 +4,7 @@ import fs from 'fs';
 import fsP from 'fs/promises';
 import { ApplicationCommandOptionType, ApplicationCommandType, Client, REST, Routes, type ClientEvents, type Interaction } from 'discord.js';
 import path from 'path';
+import wildcardMatch from 'wildcard-match';
 import type { CommandModule, CustomModule, EventModule, InteractionModule } from './types';
 
 if (process.argv[2] === "dev")
@@ -422,12 +423,25 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
         if (fs.existsSync("./src/interactions")) {
             type RegisteredInteraction = {
+                "customId": string;
+                "matches": (customId: string) => boolean;
                 "module": InteractionModule;
                 "once": boolean;
             };
 
-            let registeredInteractions = new Map<string, RegisteredInteraction>();
+            let registeredInteractions = new Map<InteractionModule[0], RegisteredInteraction[]>();
             let interactionSourceFingerprint = "";
+
+            const removeInteraction = (
+                type: InteractionModule[0],
+                registeredInteraction: RegisteredInteraction
+            ) => {
+                const remaining = (registeredInteractions.get(type) ?? [])
+                    .filter(interaction => interaction !== registeredInteraction);
+
+                if (remaining.length === 0) registeredInteractions.delete(type);
+                else registeredInteractions.set(type, remaining);
+            };
 
             const reloadInteractions = async (initial = false) => {
                 const sourceFingerprint = await getSourceFingerprint("./src/interactions");
@@ -440,7 +454,8 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 try {
                     const cacheKey = Date.now();
                     const modulePaths = await readSourceModulePaths("./src/interactions");
-                    const nextInteractions = new Map<string, RegisteredInteraction>();
+                    const nextInteractions = new Map<InteractionModule[0], RegisteredInteraction[]>();
+                    const interactionKeys = new Set<string>();
 
                     for (const modulePath of modulePaths) {
                         const module: {
@@ -455,14 +470,20 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                         if (!module.customId)
                             throw new Error(`${relativePath}: Interaction modules must export a customId string.`);
 
-                        const key = `${module.default[0]}:${module.customId}`;
-                        if (nextInteractions.has(key))
+                        const type = module.default[0];
+                        const key = `${type}:${module.customId}`;
+                        if (interactionKeys.has(key))
                             throw new Error(`${relativePath}: Duplicate interaction key "${key}".`);
+                        interactionKeys.add(key);
 
-                        nextInteractions.set(key, {
+                        const interactions = nextInteractions.get(type) ?? [];
+                        interactions.push({
+                            "customId": module.customId,
+                            "matches": wildcardMatch(module.customId, false),
                             "module": module.default,
                             "once": module.once === true
                         });
+                        nextInteractions.set(type, interactions);
                     }
 
                     registeredInteractions = nextInteractions;
@@ -498,16 +519,21 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                         : "customId" in interaction ? interaction.customId : undefined;
                     if (!interactionId) return;
 
-                    const key = `${interactionType}:${interactionId}`;
-                    const registeredInteraction = registeredInteractions.get(key);
+                    const interactions = registeredInteractions.get(interactionType) ?? [];
+                    const registeredInteraction =
+                        interactions.find(({ customId }) => customId === interactionId) ??
+                        interactions.find(({ matches }) => matches(interactionId));
                     if (!registeredInteraction) return;
 
-                    if (registeredInteraction.once) registeredInteractions.delete(key);
+                    if (registeredInteraction.once)
+                        removeInteraction(interactionType, registeredInteraction);
+
                     return registeredInteraction.module[1]({
                         "client": cli,
                         rest,
                         interaction,
-                        "removeListener": () => registeredInteractions.delete(key)
+                        "removeListener": () =>
+                            removeInteraction(interactionType, registeredInteraction)
                     } as never);
                 });
             });

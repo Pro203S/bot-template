@@ -301,6 +301,8 @@ const readLine = (q) => new Promise(r => line.question(`${chalk.cyan(chalk.bold(
         await execFileAsync("git", ["add", "*"]);
         await execFileAsync("git", ["commit", "-m", "Initial Commit"]);
 
+        fs.renameSync("README.md", "GUIDE.md");
+
         const readMe = `# ${name}\r\n`;
         fs.writeFileSync("README.md", readMe, "utf-8");
 
