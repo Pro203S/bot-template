@@ -106,3 +106,21 @@ export type InteractionModule<K extends keyof InteractionModuleMap = keyof Inter
 ];
 
 //#endregion
+
+//#region CustomModule
+
+type CustomModuleMap = {
+    "ready": {},
+    "error": { "error": unknown },
+    "djsDebug": { "message": string },
+    "djsWarn": { "message": string },
+    "djsError": { "message": string },
+    "exit": { "code": number }
+};
+
+export type CustomModule<K extends keyof CustomModuleMap = keyof CustomModuleMap> = [
+    K,
+    (params: CallbackParameters<CustomModuleMap[K]>) => unknown
+];
+
+//#endregion

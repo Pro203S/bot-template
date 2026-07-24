@@ -4,7 +4,7 @@ import fs from 'fs';
 import fsP from 'fs/promises';
 import { ApplicationCommandOptionType, ApplicationCommandType, Client, REST, Routes, type ClientEvents, type Interaction } from 'discord.js';
 import path from 'path';
-import type { CommandModule, EventModule, InteractionModule } from './types';
+import type { CommandModule, CustomModule, EventModule, InteractionModule } from './types';
 
 if (process.argv[2] === "dev")
     (process.env as any).IS_DEV = "true";
@@ -72,6 +72,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
         let hotReloadQueue = Promise.resolve();
         const hotReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+        let dispatchCustomReady: (() => void) | undefined;
 
         const watchForHotReload = (directory: string, label: string, reload: () => Promise<void>) => {
             if (process.env.IS_DEV !== "true") return;
@@ -468,7 +469,139 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
             watchForHotReload("./src/interactions", "interactions", () => reloadInteractions());
         }
 
+        if (fs.existsSync("./src/customs")) {
+            type CustomType = CustomModule[0];
+            type RegisteredCustom = {
+                "id": string;
+                "module": CustomModule;
+                "once": boolean;
+            };
+
+            const customTypes = new Set<CustomType>([
+                "ready",
+                "error",
+                "djsDebug",
+                "djsWarn",
+                "djsError",
+                "exit"
+            ]);
+
+            let registeredCustoms = new Map<CustomType, RegisteredCustom[]>();
+            let customSourceFingerprint = "";
+
+            const removeCustom = (type: CustomType, id: string) => {
+                const remaining = (registeredCustoms.get(type) ?? [])
+                    .filter(custom => custom.id !== id);
+
+                if (remaining.length === 0) registeredCustoms.delete(type);
+                else registeredCustoms.set(type, remaining);
+            };
+
+            const dispatchCustom = (type: CustomType, params: Record<string, unknown> = {}) => {
+                const customs = [...(registeredCustoms.get(type) ?? [])];
+
+                const reportError = (error: unknown) => {
+                    const errorCustoms = registeredCustoms.get("error") ?? [];
+                    if (type !== "error" && errorCustoms.length > 0) {
+                        dispatchCustom("error", { error });
+                        return;
+                    }
+
+                    const message = error instanceof Error
+                        ? error.stack ?? error.message
+                        : String(error);
+                    console.error((`Custom "${type}" handler failed: ${message}`).red);
+                };
+
+                for (const custom of customs) {
+                    if (custom.once) removeCustom(type, custom.id);
+
+                    try {
+                        const result = custom.module[1]({
+                            "client": cli,
+                            rest,
+                            ...params
+                        } as never);
+                        void Promise.resolve(result).catch(reportError);
+                    } catch (error) {
+                        reportError(error);
+                    }
+                }
+            };
+
+            const reloadCustoms = async (initial = false) => {
+                const sourceFingerprint = await getSourceFingerprint("./src/customs");
+                if (!initial && sourceFingerprint === customSourceFingerprint) return;
+
+                const previousSpinnerText = spinner.text;
+                const wasSpinnerSpinning = spinner.isSpinning;
+                spinner.start(initial ? "Loading customs..." : "Reloading customs...");
+
+                try {
+                    const cacheKey = Date.now();
+                    const modulePaths = await readSourceModulePaths("./src/customs");
+                    const nextCustoms = new Map<CustomType, RegisteredCustom[]>();
+
+                    for (const modulePath of modulePaths) {
+                        const module: {
+                            "default"?: CustomModule;
+                            "once"?: boolean;
+                        } = await import(getSourceImportPath(modulePath, cacheKey));
+
+                        const relativePath = path.relative("./src/customs", modulePath)
+                            .split(path.sep).join("/");
+                        if (!module.default)
+                            throw new Error(`${relativePath}: Expected the default export to be a CustomModule tuple.`);
+                        if (!customTypes.has(module.default[0]))
+                            throw new Error(`${relativePath}: Unknown custom type "${String(module.default[0])}".`);
+                        if (typeof module.default[1] !== "function")
+                            throw new Error(`${relativePath}: Expected CustomModule[1] to be a function.`);
+
+                        const type = module.default[0];
+                        const customs = nextCustoms.get(type) ?? [];
+                        customs.push({
+                            "id": relativePath,
+                            "module": module.default,
+                            "once": module.once === true
+                        });
+                        nextCustoms.set(type, customs);
+                    }
+
+                    registeredCustoms = nextCustoms;
+                    customSourceFingerprint = sourceFingerprint;
+
+                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
+                    else spinner.succeed("Customs reloaded.");
+
+                    if (!initial) dispatchCustom("ready");
+                } catch (error) {
+                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
+                    else spinner.fail("Failed to reload customs.");
+                    throw error;
+                }
+            };
+
+            await reloadCustoms(true);
+
+            client.on("debug", message => dispatchCustom("djsDebug", { message }));
+            client.on("warn", message => dispatchCustom("djsWarn", { message }));
+            client.on("error", error => {
+                if ((registeredCustoms.get("djsError")?.length ?? 0) > 0) {
+                    dispatchCustom("djsError", { "message": error.message });
+                    return;
+                }
+
+                console.error(("Discord.js error: " + (error.stack ?? error.message)).red);
+            });
+            process.on("uncaughtExceptionMonitor", error => dispatchCustom("error", { error }));
+            process.once("exit", code => dispatchCustom("exit", { code }));
+
+            dispatchCustomReady = () => dispatchCustom("ready");
+            watchForHotReload("./src/customs", "customs", () => reloadCustoms());
+        }
+
         spinner.succeed("Logged in as " + `${cli.user.username}#${cli.user.discriminator}`.white.bold + "!" + ` (${Date.now() - now}ms)`.dim);
+        dispatchCustomReady?.();
     } catch (e) {
         spinner.stop();
         handleError(e);
