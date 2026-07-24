@@ -73,6 +73,50 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
         let hotReloadQueue = Promise.resolve();
         const hotReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
         let dispatchCustomReady: (() => void) | undefined;
+        let dispatchRuntimeError: ((error: unknown) => boolean) | undefined;
+
+        const logRuntimeError = (scope: string, error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`[${scope}] ${message}`.red);
+
+            if (error instanceof Error && error.stack)
+                console.error(error.stack.dim);
+        };
+
+        const reportRuntimeError = (scope: string, error: unknown, useCustomHandler = true) => {
+            if (useCustomHandler && dispatchRuntimeError) {
+                try {
+                    if (dispatchRuntimeError(error)) return;
+                } catch (dispatchError) {
+                    logRuntimeError("Error custom dispatcher", dispatchError);
+                }
+            }
+
+            logRuntimeError(scope, error);
+        };
+
+        const runSafely = (scope: string, callback: () => unknown, useCustomHandler = true) => {
+            try {
+                const result = callback();
+                void Promise.resolve(result)
+                    .catch(error => reportRuntimeError(scope, error, useCustomHandler));
+            } catch (error) {
+                reportRuntimeError(scope, error, useCustomHandler);
+            }
+        };
+
+        const loadModuleGroup = async (label: string, load: () => Promise<void>) => {
+            try {
+                await load();
+            } catch (error) {
+                reportRuntimeError(`Failed to load ${label}`, error);
+            }
+        };
+
+        process.on("uncaughtException", error =>
+            reportRuntimeError("Uncaught exception", error));
+        process.on("unhandledRejection", reason =>
+            reportRuntimeError("Unhandled rejection", reason));
 
         const watchForHotReload = (directory: string, label: string, reload: () => Promise<void>) => {
             if (process.env.IS_DEV !== "true") return;
@@ -84,7 +128,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 hotReloadTimers.set(directory, setTimeout(() => {
                     hotReloadQueue = hotReloadQueue
                         .then(reload)
-                        .catch(error => console.error((`Failed to reload ${label}: ` + String(error)).red));
+                        .catch(error => reportRuntimeError(`Failed to reload ${label}`, error));
                 }, 150));
             });
         };
@@ -123,10 +167,8 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                         `./commands/${[...parts, entry.name].join("/")}?update=${cacheKey}`
                     );
 
-                    if (!module.default) {
-                        console.error(`${path.join(...parts, entry.name)}: Expected the default export to be a CommandModule tuple.`.red);
-                        return [];
-                    }
+                    if (!module.default)
+                        throw new Error(`${path.join(...parts, entry.name)}: Expected the default export to be a CommandModule tuple.`);
 
                     return [{ "parts": [...parts, name], "command": module.default }];
                 }));
@@ -191,10 +233,8 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                         continue;
                     }
 
-                    if (command[0] !== "slash" || loaded.parts.length > 3) {
-                        console.error(`${loaded.parts.join("/")}: Nested commands must be slash commands with at most one subcommand group.`.red);
-                        continue;
-                    }
+                    if (command[0] !== "slash" || loaded.parts.length > 3)
+                        throw new Error(`${loaded.parts.join("/")}: Nested commands must be slash commands with at most one subcommand group.`);
 
                     let body = registeredCommands.get(commandName);
                     if (!body) {
@@ -288,21 +328,23 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 }
             };
 
-            await reloadCommands(true);
+            await loadModuleGroup("commands", () => reloadCommands(true));
 
             client.on("interactionCreate", interaction => {
-                if (!interaction.isCommand()) return;
+                runSafely("Command interaction", () => {
+                    if (!interaction.isCommand()) return;
 
-                const parts = [interaction.commandName];
-                if (interaction.isChatInputCommand()) {
-                    const group = interaction.options.getSubcommandGroup(false);
-                    const subcommand = interaction.options.getSubcommand(false);
-                    if (group) parts.push(group);
-                    if (subcommand) parts.push(subcommand);
-                }
+                    const parts = [interaction.commandName];
+                    if (interaction.isChatInputCommand()) {
+                        const group = interaction.options.getSubcommandGroup(false);
+                        const subcommand = interaction.options.getSubcommand(false);
+                        if (group) parts.push(group);
+                        if (subcommand) parts.push(subcommand);
+                    }
 
-                const handler = handlers.get(parts.join("/"));
-                if (handler) void handler({ "client": cli, rest, interaction } as never);
+                    const handler = handlers.get(parts.join("/"));
+                    return handler?.({ "client": cli, rest, interaction } as never);
+                });
             });
 
             watchForHotReload("./src/commands", "commands", () => reloadCommands());
@@ -342,12 +384,14 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
                         const eventModule = module.default;
                         const eventName = eventModule[0];
-                        const listener = (...eventArgs: any[]) => eventModule[1]({
-                            "client": cli,
-                            rest,
-                            eventArgs,
-                            "removeListener": () => client.removeListener(eventName, listener as never)
-                        } as never);
+                        const listener = (...eventArgs: any[]) => {
+                            runSafely(`Event "${String(eventName)}"`, () => eventModule[1]({
+                                "client": cli,
+                                rest,
+                                eventArgs,
+                                "removeListener": () => client.removeListener(eventName, listener as never)
+                            } as never));
+                        };
 
                         nextEvents.push({ eventName, listener, "once": module.once === true });
                     }
@@ -372,7 +416,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 }
             };
 
-            await reloadEvents(true);
+            await loadModuleGroup("events", () => reloadEvents(true));
             watchForHotReload("./src/events", "events", () => reloadEvents());
         }
 
@@ -433,37 +477,39 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 }
             };
 
-            await reloadInteractions(true);
+            await loadModuleGroup("interactions", () => reloadInteractions(true));
 
             client.on("interactionCreate", (interaction: Interaction) => {
-                let interactionType: InteractionModule[0] | undefined;
+                runSafely("Interaction router", () => {
+                    let interactionType: InteractionModule[0] | undefined;
 
-                if (interaction.isButton()) interactionType = "button";
-                else if (interaction.isAutocomplete()) interactionType = "autoComplete";
-                else if (interaction.isModalSubmit()) interactionType = "modalSubmit";
-                else if (interaction.isStringSelectMenu()) interactionType = "stringSelect";
-                else if (interaction.isRoleSelectMenu()) interactionType = "roleSelect";
-                else if (interaction.isMentionableSelectMenu()) interactionType = "mentionableSelect";
-                else if (interaction.isChannelSelectMenu()) interactionType = "channelSelect";
+                    if (interaction.isButton()) interactionType = "button";
+                    else if (interaction.isAutocomplete()) interactionType = "autoComplete";
+                    else if (interaction.isModalSubmit()) interactionType = "modalSubmit";
+                    else if (interaction.isStringSelectMenu()) interactionType = "stringSelect";
+                    else if (interaction.isRoleSelectMenu()) interactionType = "roleSelect";
+                    else if (interaction.isMentionableSelectMenu()) interactionType = "mentionableSelect";
+                    else if (interaction.isChannelSelectMenu()) interactionType = "channelSelect";
 
-                if (!interactionType) return;
+                    if (!interactionType) return;
 
-                const interactionId = interaction.isAutocomplete()
-                    ? interaction.commandName
-                    : "customId" in interaction ? interaction.customId : undefined;
-                if (!interactionId) return;
+                    const interactionId = interaction.isAutocomplete()
+                        ? interaction.commandName
+                        : "customId" in interaction ? interaction.customId : undefined;
+                    if (!interactionId) return;
 
-                const key = `${interactionType}:${interactionId}`;
-                const registeredInteraction = registeredInteractions.get(key);
-                if (!registeredInteraction) return;
+                    const key = `${interactionType}:${interactionId}`;
+                    const registeredInteraction = registeredInteractions.get(key);
+                    if (!registeredInteraction) return;
 
-                if (registeredInteraction.once) registeredInteractions.delete(key);
-                void registeredInteraction.module[1]({
-                    "client": cli,
-                    rest,
-                    "eventArgs": interaction,
-                    "removeListener": () => registeredInteractions.delete(key)
-                } as never);
+                    if (registeredInteraction.once) registeredInteractions.delete(key);
+                    return registeredInteraction.module[1]({
+                        "client": cli,
+                        rest,
+                        interaction,
+                        "removeListener": () => registeredInteractions.delete(key)
+                    } as never);
+                });
             });
 
             watchForHotReload("./src/interactions", "interactions", () => reloadInteractions());
@@ -500,32 +546,18 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
             const dispatchCustom = (type: CustomType, params: Record<string, unknown> = {}) => {
                 const customs = [...(registeredCustoms.get(type) ?? [])];
 
-                const reportError = (error: unknown) => {
-                    const errorCustoms = registeredCustoms.get("error") ?? [];
-                    if (type !== "error" && errorCustoms.length > 0) {
-                        dispatchCustom("error", { error });
-                        return;
-                    }
-
-                    const message = error instanceof Error
-                        ? error.stack ?? error.message
-                        : String(error);
-                    console.error((`Custom "${type}" handler failed: ${message}`).red);
-                };
-
                 for (const custom of customs) {
                     if (custom.once) removeCustom(type, custom.id);
 
-                    try {
-                        const result = custom.module[1]({
+                    runSafely(
+                        `Custom "${type}" (${custom.id})`,
+                        () => custom.module[1]({
                             "client": cli,
                             rest,
                             ...params
-                        } as never);
-                        void Promise.resolve(result).catch(reportError);
-                    } catch (error) {
-                        reportError(error);
-                    }
+                        } as never),
+                        type !== "error"
+                    );
                 }
             };
 
@@ -581,7 +613,13 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 }
             };
 
-            await reloadCustoms(true);
+            await loadModuleGroup("customs", () => reloadCustoms(true));
+
+            dispatchRuntimeError = error => {
+                if ((registeredCustoms.get("error")?.length ?? 0) === 0) return false;
+                dispatchCustom("error", { error });
+                return true;
+            };
 
             client.on("debug", message => dispatchCustom("djsDebug", { message }));
             client.on("warn", message => dispatchCustom("djsWarn", { message }));
@@ -593,7 +631,6 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
                 console.error(("Discord.js error: " + (error.stack ?? error.message)).red);
             });
-            process.on("uncaughtExceptionMonitor", error => dispatchCustom("error", { error }));
             process.once("exit", code => dispatchCustom("exit", { code }));
 
             dispatchCustomReady = () => dispatchCustom("ready");

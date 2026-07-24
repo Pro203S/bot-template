@@ -137,7 +137,7 @@ export type InteractionModule<K extends keyof InteractionModuleMap = keyof Inter
     [Type in K]: [
         Type,
         (params: CallbackParameters<{
-            "eventArgs": InteractionModuleMap[Type],
+            "interaction": InteractionModuleMap[Type],
             "removeListener": () => void
         }>) => unknown
     ]
@@ -146,7 +146,7 @@ export type InteractionModule<K extends keyof InteractionModuleMap = keyof Inter
 export const defineInteraction = <Type extends keyof InteractionModuleMap>(module: [
     Type,
     (params: CallbackParameters<{
-        "eventArgs": InteractionModuleMap[NoInfer<Type>],
+        "interaction": InteractionModuleMap[NoInfer<Type>],
         "removeListener": () => void
     }>) => unknown
 ]) => module;
