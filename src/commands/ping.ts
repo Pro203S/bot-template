@@ -6,7 +6,7 @@ const command: CommandModule = [
         "description": "퐁"
     },
     async ({ interaction }) => {
-        
+        await interaction.reply("퐁");
     }
 ];
 
