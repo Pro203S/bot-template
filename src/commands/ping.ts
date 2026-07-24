@@ -1,6 +1,6 @@
-import type { CommandModule } from "types";
+import { defineCommand } from "types";
 
-const command: CommandModule = [
+const module = defineCommand([
     "slash",
     {
         "description": "퐁"
@@ -8,6 +8,6 @@ const command: CommandModule = [
     async ({ interaction }) => {
         await interaction.reply("퐁");
     }
-];
+]);
 
-export default command;
+export default module;
