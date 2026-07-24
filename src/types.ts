@@ -1,4 +1,22 @@
-import { AutocompleteInteraction, ButtonInteraction, ChannelSelectMenuInteraction, EntryPointCommandHandlerType, Events, MentionableSelectMenuInteraction, ModalSubmitInteraction, RoleSelectMenuInteraction, StringSelectMenuInteraction, type ChatInputCommandInteraction, type Client, type ClientEvents, type ClientOptions, type MessageContextMenuCommandInteraction, type PrimaryEntryPointCommandInteraction, type REST, type RESTOptions, type UserContextMenuCommandInteraction } from "discord.js";
+import {
+    AutocompleteInteraction,
+    ButtonInteraction,
+    ChannelSelectMenuInteraction,
+    EntryPointCommandHandlerType,
+    MentionableSelectMenuInteraction,
+    ModalSubmitInteraction,
+    RoleSelectMenuInteraction,
+    StringSelectMenuInteraction,
+    type ChatInputCommandInteraction,
+    type Client,
+    type ClientEvents,
+    type ClientOptions,
+    type MessageContextMenuCommandInteraction,
+    type PrimaryEntryPointCommandInteraction,
+    type REST,
+    type RESTOptions,
+    type UserContextMenuCommandInteraction
+} from "discord.js";
 
 export type Environment = {
     "token": string;
