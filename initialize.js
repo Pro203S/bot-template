@@ -121,7 +121,18 @@ export const chalk = {
 
 export class ConsoleSpinner {
     constructor() {
-        this.frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        this.frames = [
+            chalk.rgb("⠋", 255, 0, 0),
+            chalk.rgb("⠙", 255, 85, 0),
+            chalk.rgb("⠹", 255, 170, 0),
+            chalk.rgb("⠸", 255, 255, 0),
+            chalk.rgb("⠼", 128, 255, 0),
+            chalk.rgb("⠴", 0, 255, 0),
+            chalk.rgb("⠦", 0, 255, 170),
+            chalk.rgb("⠧", 0, 170, 255),
+            chalk.rgb("⠇", 0, 0, 255),
+            chalk.rgb("⠏", 128, 0, 255),
+        ];
         this.interval = 80;
         this.text = "";
         this.timer = null;
@@ -288,8 +299,6 @@ const readLine = (q) => new Promise(r => line.question(`${chalk.cyan(chalk.bold(
     try {
         const name = path.basename(path.dirname(fileURLToPath(import.meta.url)));
 
-        console.log();
-
         spinner.start("Installing packages...");
         const discordJsLatestVersion = await UpdateDiscordJS();
         spinner.succeed("Updated discord.js to " + chalk.bold(discordJsLatestVersion));
@@ -333,7 +342,7 @@ const readLine = (q) => new Promise(r => line.question(`${chalk.cyan(chalk.bold(
         await execFileAsync("git", ["add", "*"]);
         await execFileAsync("git", ["commit", "-m", "Initial Commit"]);
 
-        console.log("\r\nInitialized the project!");
+        console.log(chalk.green("\r\nInitialized the project!"));
     } catch (err) {
         spinner.fail(err.message);
         throw err;
