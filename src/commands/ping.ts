@@ -1,4 +1,3 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
 import { defineCommand } from "types";
 
 const module = defineCommand([
@@ -7,16 +6,7 @@ const module = defineCommand([
         "description": "퐁"
     },
     async ({ interaction }) => {
-        await interaction.reply({
-            "content": "퐁",
-            "components": [new ActionRowBuilder()
-                .addComponents(
-                    new ButtonBuilder()
-                        .setCustomId("button-asdf")
-                        .setLabel("label")
-                        .setStyle(ButtonStyle.Primary)
-                ).toJSON()]
-        });
+        return await interaction.reply("퐁");
     }
 ]);
 
