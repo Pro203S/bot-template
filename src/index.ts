@@ -1,5 +1,4 @@
 import 'colors';
-import ora from 'ora';
 import fs from 'fs';
 import fsP from 'fs/promises';
 import { ApplicationCommandOptionType, ApplicationCommandType, Client, REST, Routes, type ClientEvents, type Interaction } from 'discord.js';
@@ -20,29 +19,46 @@ const timeFormat = new Intl.DateTimeFormat("sv-SE", {
     "hourCycle": "h23"
 });
 
-const time = () => `[${timeFormat.format(new Date())}]`.white.dim;
+let onError: ((err: unknown) => boolean) | undefined;
 
-const mainFile = "index.ts";
+type LogCategory = "INFO" | "CMD" | "EVENT" | "ACTION" | "CUSTOM";
 
-const log = (file: string, content: string) =>
-    console.log(`  ${time()} ${file} ${content}`);
+const log = (content: string, type: LogCategory = "INFO") => {
+    const time = timeFormat.format(new Date()).dim;
+    const category = `\x1b[96m${type.padEnd(6)}\x1b[39m`;
+    console.log(`${time} | ${category} | ${content}`);
+};
 
-const error = (err: unknown, file = mainFile) => {
+const error = (err: unknown, custom = true) => {
+    if (custom && onError) {
+        try {
+            if (onError(err)) return;
+        } catch (handlerError) {
+            error(handlerError, false);
+        }
+    }
+
+    const time = timeFormat.format(new Date()).dim;
+    const category = "ERROR".padEnd(6).red;
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`${time()} ${file} ${`Error: ${message}`.red}`);
+    console.error(`${time} | ${category} | ${`Error: ${message}`.red}`);
 
     if (err instanceof Error && err.stack) {
         const stack = err.stack
             .split("\n")
-            .map(line => `${time()} ${file} ${line.gray}`)
+            .map(line => {
+                const time = timeFormat.format(new Date()).dim;
+                return `${time} | ${category} | ${line.gray}`;
+            })
             .join("\n");
         console.error(stack);
     }
 };
 
-const handleError = (err: unknown) => {
-    error(err);
-    process.exit(1);
+const warn = (content: string) => {
+    const time = timeFormat.format(new Date()).dim;
+    const category = "WARN".padEnd(6).yellow;
+    console.warn(`${time} | ${category} | ${content}`);
 };
 
 //#region utils
@@ -79,7 +95,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
 (async () => {
     const now = Date.now();
-    const spinner = ora().start(`${time()} ${mainFile} Starting...`);
+    log("Starting...");
 
     try {
         if (!fs.existsSync("discord-env.ts")) throw new Error("Could not find discord-env.ts. Did you place it in the project root?");
@@ -101,40 +117,27 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
         let hotReloadQueue = Promise.resolve();
         const hotReloadTimers = new Map<string, NodeJS.Timeout>();
         let dispatchCustomReady: (() => void) | undefined;
-        let dispatchRuntimeError: ((error: unknown) => boolean) | undefined;
 
-        const reportRuntimeError = (err: unknown, useCustomHandler = true) => {
-            if (useCustomHandler && dispatchRuntimeError) {
-                try {
-                    if (dispatchRuntimeError(err)) return;
-                } catch (dispatchError) {
-                    error(dispatchError);
-                }
-            }
-
-            error(err);
-        };
-
-        const runSafely = (callback: () => unknown, useCustomHandler = true) => {
+        const runSafely = (callback: () => unknown, custom = true) => {
             try {
                 const result = callback();
                 void Promise.resolve(result)
-                    .catch(error => reportRuntimeError(error, useCustomHandler));
-            } catch (error) {
-                reportRuntimeError(error, useCustomHandler);
+                    .catch(err => error(err, custom));
+            } catch (err) {
+                error(err, custom);
             }
         };
 
         const loadModuleGroup = async (load: () => Promise<void>) => {
             try {
                 await load();
-            } catch (error) {
-                reportRuntimeError(error);
+            } catch (err) {
+                error(err);
             }
         };
 
-        process.on("uncaughtException", error => reportRuntimeError(error));
-        process.on("unhandledRejection", reason => reportRuntimeError(reason));
+        process.on("uncaughtException", err => error(err));
+        process.on("unhandledRejection", reason => error(reason));
 
         const watchForHotReload = (directory: string, reload: () => Promise<void>) => {
             if (process.env.IS_DEV !== "true") return;
@@ -146,20 +149,15 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 hotReloadTimers.set(directory, setTimeout(() => {
                     hotReloadQueue = hotReloadQueue
                         .then(reload)
-                        .catch(reportRuntimeError);
+                        .catch(err => error(err));
                 }, 150));
             });
         };
 
         if (fs.existsSync("./src/commands")) {
             type LoadedCommand = {
-                file: string;
                 parts: [string, ...string[]];
                 command: CommandModule;
-            };
-            type CommandHandler = {
-                file: string;
-                run: CommandModule[2];
             };
             type CommandBody = Record<string, unknown>;
 
@@ -205,7 +203,6 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     if (!commandName) throw new Error(`${relativePath}: Command name cannot be empty.`);
 
                     return {
-                        "file": relativePath.split(path.sep).join("/"),
                         "parts": [commandName, ...parts],
                         "command": module.default
                     };
@@ -254,9 +251,9 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
             const buildCommandState = async () => {
                 const loadedCommands = await readCommands(Date.now());
                 const registeredCommands = new Map<string, CommandBody>();
-                const nextHandlers = new Map<string, CommandHandler>();
+                const nextHandlers = new Map<string, CommandModule[2]>();
 
-                for (const { file, parts, command } of loadedCommands) {
+                for (const { parts, command } of loadedCommands) {
                     const [commandName, groupOrSubcommand, subcommand] = parts;
 
                     if (!groupOrSubcommand) {
@@ -297,7 +294,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                         }
                     }
 
-                    nextHandlers.set(parts.join("/"), { file, "run": command[2] });
+                    nextHandlers.set(parts.join("/"), command[2]);
                 }
 
                 return {
@@ -311,7 +308,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 };
             };
 
-            let handlers = new Map<string, CommandHandler>();
+            let handlers = new Map<string, CommandModule[2]>();
             let registeredCommandInfo = "";
             let commandSourceFingerprint = "";
 
@@ -328,22 +325,16 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     return;
                 }
 
-                const previousSpinnerText = spinner.text;
-                const wasSpinnerSpinning = spinner.isSpinning;
-                spinner.start(
-                    `${time()} ${mainFile} ${forcePut ? "Registering commands..." : "Reloading commands..."}`
-                );
+                log(forcePut ? "Registering commands..." : "Reloading commands...");
 
                 try {
                     await rest.put(Routes.applicationCommands(env.app_id), { "body": state.body });
                     registeredCommandInfo = commandInfo;
                     commandSourceFingerprint = sourceFingerprint;
 
-                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed(`${time()} ${mainFile} Commands reloaded and registered.`);
+                    log("Commands reloaded and registered.");
                 } catch (error) {
-                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail(`${time()} ${mainFile} Failed to reload commands.`);
+                    warn("Failed to reload commands.");
                     throw error;
                 }
             };
@@ -365,8 +356,8 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     const handler = handlers.get(parts.join("/"));
                     if (!handler) return;
 
-                    log(handler.file, `Command: /${parts.join(" ")}`);
-                    return handler.run({ "client": cli, rest, interaction } as never);
+                    log(`Command: /${parts.join(" ")}`, "CMD");
+                    return handler({ "client": cli, rest, interaction } as never);
                 });
             });
 
@@ -387,11 +378,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 const sourceFingerprint = await getSourceFingerprint("./src/events");
                 if (!initial && sourceFingerprint === eventSourceFingerprint) return;
 
-                const previousSpinnerText = spinner.text;
-                const wasSpinnerSpinning = spinner.isSpinning;
-                spinner.start(
-                    `${time()} ${mainFile} ${initial ? "Loading events..." : "Reloading events..."}`
-                );
+                log(initial ? "Loading events..." : "Reloading events...");
 
                 try {
                     const cacheKey = Date.now();
@@ -412,7 +399,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                         const eventModule = module.default;
                         const eventName = eventModule[0];
                         const listener = (...eventArgs: any[]) => {
-                            log(file, `Event: ${String(eventName)}`);
+                            log(`Event: ${String(eventName)}`, "EVENT");
                             runSafely(() => eventModule[1]({
                                 "client": cli,
                                 rest,
@@ -435,11 +422,9 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     registeredEvents = nextEvents;
                     eventSourceFingerprint = sourceFingerprint;
 
-                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed(`${time()} ${mainFile} Events reloaded.`);
+                    log("Events reloaded.");
                 } catch (error) {
-                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail(`${time()} ${mainFile} Failed to reload events.`);
+                    warn("Failed to reload events.");
                     throw error;
                 }
             };
@@ -450,7 +435,6 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
         if (fs.existsSync("./src/interactions")) {
             type RegisteredInteraction = {
-                "file": string;
                 "customId": string;
                 "matches": (customId: string) => boolean;
                 "module": InteractionModule;
@@ -475,11 +459,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 const sourceFingerprint = await getSourceFingerprint("./src/interactions");
                 if (!initial && sourceFingerprint === interactionSourceFingerprint) return;
 
-                const previousSpinnerText = spinner.text;
-                const wasSpinnerSpinning = spinner.isSpinning;
-                spinner.start(
-                    `${time()} ${mainFile} ${initial ? "Loading interactions..." : "Reloading interactions..."}`
-                );
+                log(initial ? "Loading interactions..." : "Reloading interactions...");
 
                 try {
                     const cacheKey = Date.now();
@@ -509,7 +489,6 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
                         const interactions = nextInteractions.get(type) ?? [];
                         interactions.push({
-                            "file": relativePath,
                             "customId": module.customId,
                             "matches": wildcardMatch(module.customId, false),
                             "module": module.default,
@@ -521,11 +500,9 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     registeredInteractions = nextInteractions;
                     interactionSourceFingerprint = sourceFingerprint;
 
-                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed(`${time()} ${mainFile} Interactions reloaded.`);
+                    log("Interactions reloaded.");
                 } catch (error) {
-                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail(`${time()} ${mainFile} Failed to reload interactions.`);
+                    warn("Failed to reload interactions.");
                     throw error;
                 }
             };
@@ -560,7 +537,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     if (registeredInteraction.once)
                         removeInteraction(interactionType, registeredInteraction);
 
-                    log(registeredInteraction.file, `Interaction: ${interactionType} (${interactionId})`);
+                    log(`Interaction: ${interactionType} (${interactionId})`, "ACTION");
                     return registeredInteraction.module[1]({
                         "client": cli,
                         rest,
@@ -608,7 +585,15 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 for (const custom of customs) {
                     if (custom.once) removeCustom(type, custom.id);
 
-                    log(custom.id, `Custom: ${type}`);
+                    if (type === "error")
+                        error(params.error, false);
+                    else if (type === "djsError")
+                        error(params.message, false);
+                    else if (type === "djsWarn")
+                        warn(String(params.message));
+
+                    log(`Custom: ${type}`, "CUSTOM");
+
                     runSafely(
                         () => custom.module[1]({
                             "client": cli,
@@ -624,11 +609,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 const sourceFingerprint = await getSourceFingerprint("./src/customs");
                 if (!initial && sourceFingerprint === customSourceFingerprint) return;
 
-                const previousSpinnerText = spinner.text;
-                const wasSpinnerSpinning = spinner.isSpinning;
-                spinner.start(
-                    `${time()} ${mainFile} ${initial ? "Loading customs..." : "Reloading customs..."}`
-                );
+                log(initial ? "Loading customs..." : "Reloading customs...");
 
                 try {
                     const cacheKey = Date.now();
@@ -663,34 +644,39 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     registeredCustoms = nextCustoms;
                     customSourceFingerprint = sourceFingerprint;
 
-                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed(`${time()} ${mainFile} Customs reloaded.`);
+                    log("Customs reloaded.");
 
                     if (!initial) dispatchCustom("ready");
                 } catch (error) {
-                    if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail(`${time()} ${mainFile} Failed to reload customs.`);
+                    warn("Failed to reload customs.");
                     throw error;
                 }
             };
 
             await loadModuleGroup(() => reloadCustoms(true));
 
-            dispatchRuntimeError = error => {
+            onError = err => {
                 if ((registeredCustoms.get("error")?.length ?? 0) === 0) return false;
-                dispatchCustom("error", { error });
+                dispatchCustom("error", { "error": err });
                 return true;
             };
 
             client.on("debug", message => dispatchCustom("djsDebug", { message }));
-            client.on("warn", message => dispatchCustom("djsWarn", { message }));
+            client.on("warn", message => {
+                if ((registeredCustoms.get("djsWarn")?.length ?? 0) > 0) {
+                    dispatchCustom("djsWarn", { message });
+                    return;
+                }
+
+                warn(`Discord.js: ${message}`);
+            });
             client.on("error", err => {
                 if ((registeredCustoms.get("djsError")?.length ?? 0) > 0) {
                     dispatchCustom("djsError", { "message": err.message });
                     return;
                 }
 
-                error(err);
+                error(err, false);
             });
             process.once("exit", code => dispatchCustom("exit", { code }));
 
@@ -698,15 +684,15 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
             watchForHotReload("./src/customs", () => reloadCustoms());
         }
 
-        spinner.succeed(
-            `${time()} ${mainFile} Logged in as ` +
+        log(
+            "Logged in as " +
             `${cli.user.username}#${cli.user.discriminator}`.white.bold +
             "!" +
             ` (${Date.now() - now}ms)`.dim
         );
         dispatchCustomReady?.();
     } catch (e) {
-        spinner.stop();
-        handleError(e);
+        error(e);
+        process.exit(1);
     }
 })();
