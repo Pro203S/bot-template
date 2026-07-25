@@ -312,6 +312,18 @@ const readLine = (q) => new Promise(r => line.question(`${chalk.cyan(chalk.bold(
 
         fs.renameSync("discord-env.example.ts", "discord-env.ts");
 
+        if (!fs.existsSync("./src/events"))
+            fs.mkdirSync("./src/events");
+
+        if (!fs.existsSync("./src/interactions"))
+            fs.mkdirSync("./src/interactions");
+
+        if (!fs.existsSync("./src/customs"))
+            fs.mkdirSync("./src/customs");
+
+        if (!fs.existsSync("./src/modules"))
+            fs.mkdirSync("./src/modules");
+
         spinner.succeed("Magic complete!");
 
         spinner.start("Initializing git...");
