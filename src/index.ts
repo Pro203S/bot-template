@@ -10,17 +10,34 @@ import type { CommandModule, CustomModule, EventModule, InteractionModule } from
 if (process.argv[2] === "dev")
     (process.env as any).IS_DEV = "true";
 
-const handleError = (err: unknown) => {
-    if (err instanceof Error) {
-        console.error(("Error: " + err.message).red);
-        if (err.stack)
-            console.error(err.stack.dim);
-        process.exit(1);
-    }
+const timeFormat = new Intl.DateTimeFormat("sv-SE", {
+    "year": "numeric",
+    "month": "2-digit",
+    "day": "2-digit",
+    "hour": "2-digit",
+    "minute": "2-digit",
+    "second": "2-digit",
+    "hourCycle": "h23"
+});
 
-    console.error(String(err).red);
+const time = () => `[${timeFormat.format(new Date())}]`.white.dim;
+
+const log = (message: string) => console.log(`${time()} ${message}`);
+
+const error = (err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`${time()} ${`Error: ${message}`.red}`);
+
+    if (err instanceof Error && err.stack)
+        console.error(`${time()} ${err.stack.gray}`);
+};
+
+const handleError = (err: unknown) => {
+    error(err);
     process.exit(1);
 };
+
+//#region utils
 
 const isSourceModule = (fileName: string) =>
     /\.[cm]?[jt]s$/.test(fileName) && !fileName.endsWith(".d.ts");
@@ -50,9 +67,11 @@ const getSourceFingerprint = async (directory: string) => {
 const getSourceImportPath = (modulePath: string, cacheKey: number) =>
     `./${path.relative("./src", modulePath).split(path.sep).join("/")}?update=${cacheKey}`;
 
+//#endregion
+
 (async () => {
     const now = Date.now();
-    const spinner = ora().start("Starting...");
+    const spinner = ora().start(`${time()} Starting...`);
 
     try {
         if (!fs.existsSync("discord-env.ts")) throw new Error("Could not find discord-env.ts. Did you place it in the project root?");
@@ -72,54 +91,44 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
         const cli = await new Promise<Client<true>>(r => client.once("clientReady", r));
 
         let hotReloadQueue = Promise.resolve();
-        const hotReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+        const hotReloadTimers = new Map<string, NodeJS.Timeout>();
         let dispatchCustomReady: (() => void) | undefined;
         let dispatchRuntimeError: ((error: unknown) => boolean) | undefined;
 
-        const logRuntimeError = (scope: string, error: unknown) => {
-            const message = error instanceof Error ? error.message : String(error);
-            console.error(`[${scope}] ${message}`.red);
-
-            if (error instanceof Error && error.stack)
-                console.error(error.stack.dim);
-        };
-
-        const reportRuntimeError = (scope: string, error: unknown, useCustomHandler = true) => {
+        const reportRuntimeError = (err: unknown, useCustomHandler = true) => {
             if (useCustomHandler && dispatchRuntimeError) {
                 try {
-                    if (dispatchRuntimeError(error)) return;
+                    if (dispatchRuntimeError(err)) return;
                 } catch (dispatchError) {
-                    logRuntimeError("Error custom dispatcher", dispatchError);
+                    error(dispatchError);
                 }
             }
 
-            logRuntimeError(scope, error);
+            error(err);
         };
 
-        const runSafely = (scope: string, callback: () => unknown, useCustomHandler = true) => {
+        const runSafely = (callback: () => unknown, useCustomHandler = true) => {
             try {
                 const result = callback();
                 void Promise.resolve(result)
-                    .catch(error => reportRuntimeError(scope, error, useCustomHandler));
+                    .catch(error => reportRuntimeError(error, useCustomHandler));
             } catch (error) {
-                reportRuntimeError(scope, error, useCustomHandler);
+                reportRuntimeError(error, useCustomHandler);
             }
         };
 
-        const loadModuleGroup = async (label: string, load: () => Promise<void>) => {
+        const loadModuleGroup = async (load: () => Promise<void>) => {
             try {
                 await load();
             } catch (error) {
-                reportRuntimeError(`Failed to load ${label}`, error);
+                reportRuntimeError(error);
             }
         };
 
-        process.on("uncaughtException", error =>
-            reportRuntimeError("Uncaught exception", error));
-        process.on("unhandledRejection", reason =>
-            reportRuntimeError("Unhandled rejection", reason));
+        process.on("uncaughtException", error => reportRuntimeError(error));
+        process.on("unhandledRejection", reason => reportRuntimeError(reason));
 
-        const watchForHotReload = (directory: string, label: string, reload: () => Promise<void>) => {
+        const watchForHotReload = (directory: string, reload: () => Promise<void>) => {
             if (process.env.IS_DEV !== "true") return;
 
             fs.watch(directory, { "recursive": true }, (_, fileName) => {
@@ -129,17 +138,24 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 hotReloadTimers.set(directory, setTimeout(() => {
                     hotReloadQueue = hotReloadQueue
                         .then(reload)
-                        .catch(error => reportRuntimeError(`Failed to reload ${label}`, error));
+                        .catch(reportRuntimeError);
                 }, 150));
             });
         };
 
         if (fs.existsSync("./src/commands")) {
             type LoadedCommand = {
-                parts: string[];
+                parts: [string, ...string[]];
                 command: CommandModule;
             };
+            type CommandBody = Record<string, unknown>;
 
+            const commandTypes = {
+                "slash": ApplicationCommandType.ChatInput,
+                "messageContextMenu": ApplicationCommandType.Message,
+                "userContextMenu": ApplicationCommandType.User,
+                "primaryEntry": ApplicationCommandType.PrimaryEntryPoint
+            } satisfies Record<CommandModule[0], ApplicationCommandType>;
             const optionTypes = {
                 "string": ApplicationCommandOptionType.String,
                 "integer": ApplicationCommandOptionType.Integer,
@@ -151,136 +167,123 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 "number": ApplicationCommandOptionType.Number,
                 "attachment": ApplicationCommandOptionType.Attachment
             };
+            const optionProperties = {
+                "required": "required",
+                "choices": "choices",
+                "autoComplete": "autocomplete",
+                "minLength": "min_length",
+                "maxLength": "max_length",
+                "minValue": "min_value",
+                "maxValue": "max_value"
+            } as const;
 
-            const readCommands = async (directory: string, cacheKey: number, parts: string[] = []): Promise<LoadedCommand[]> => {
-                const entries = await fsP.readdir(directory, { "withFileTypes": true, "encoding": "utf-8" });
-                entries.sort((a, b) => a.name.localeCompare(b.name));
+            const readCommands = async (cacheKey: number): Promise<LoadedCommand[]> => {
+                const modulePaths = await readSourceModulePaths("./src/commands");
 
-                const loaded = await Promise.all(entries.map(async entry => {
-                    if (entry.isDirectory())
-                        return readCommands(path.join(directory, entry.name), cacheKey, [...parts, entry.name]);
-
-                    if (!entry.isFile() || !/\.[cm]?[jt]s$/.test(entry.name) || entry.name.endsWith(".d.ts"))
-                        return [];
-
-                    const name = entry.name.replace(/\.[cm]?[jt]s$/, "");
-                    const module: { "default"?: CommandModule } = await import(
-                        `./commands/${[...parts, entry.name].join("/")}?update=${cacheKey}`
-                    );
-
+                return Promise.all(modulePaths.map(async modulePath => {
+                    const relativePath = path.relative("./src/commands", modulePath);
+                    const module: { "default"?: CommandModule } =
+                        await import(getSourceImportPath(modulePath, cacheKey));
                     if (!module.default)
-                        throw new Error(`${path.join(...parts, entry.name)}: Expected the default export to be a CommandModule tuple.`);
+                        throw new Error(`${relativePath}: Expected the default export to be a CommandModule tuple.`);
 
-                    return [{ "parts": [...parts, name], "command": module.default }];
-                }));
+                    const parts = relativePath.replace(/\.[cm]?[jt]s$/, "").split(path.sep);
+                    const commandName = parts.shift();
+                    if (!commandName) throw new Error(`${relativePath}: Command name cannot be empty.`);
 
-                return loaded.flat();
-            };
-
-            const serializeArguments = (command: CommandModule) => {
-                if (command[0] !== "slash" || !("arguments" in command[1])) return [];
-
-                return (command[1].arguments ?? []).map(argument => {
-                    const option: Record<string, unknown> = {
-                        "type": optionTypes[argument.type],
-                        "name": argument.name,
-                        "description": argument.description
+                    return {
+                        "parts": [commandName, ...parts],
+                        "command": module.default
                     };
-
-                    if (argument.required !== undefined) option.required = argument.required;
-                    if (argument.choices !== undefined) option.choices = argument.choices;
-                    if ("autoComplete" in argument && argument.autoComplete !== undefined) option.autocomplete = argument.autoComplete;
-                    if ("minLength" in argument && argument.minLength !== undefined) option.min_length = argument.minLength;
-                    if ("maxLength" in argument && argument.maxLength !== undefined) option.max_length = argument.maxLength;
-                    if ("minValue" in argument && argument.minValue !== undefined) option.min_value = argument.minValue;
-                    if ("maxValue" in argument && argument.maxValue !== undefined) option.max_value = argument.maxValue;
-
-                    return option;
-                });
+                }));
             };
+
+            const serializeArguments = (command: CommandModule<"slash">) => (command[1].arguments ?? []).map(argument => {
+                const option: CommandBody = {
+                    "type": optionTypes[argument.type],
+                    "name": argument.name,
+                    "description": argument.description
+                };
+                const values: Partial<Record<keyof typeof optionProperties, unknown>> = argument;
+
+                for (const source of Object.keys(optionProperties) as (keyof typeof optionProperties)[]) {
+                    const value = values[source];
+                    if (value !== undefined) option[optionProperties[source]] = value;
+                }
+
+                return option;
+            });
+
+            const serializeTopLevelCommand = (name: string, command: CommandModule): CommandBody => {
+                const body: CommandBody = {
+                    name,
+                    "type": commandTypes[command[0]]
+                };
+
+                if (command[0] === "slash") {
+                    body.description = command[1].description;
+                    body.options = serializeArguments(command);
+                } else if (command[0] === "primaryEntry") {
+                    body.handler = command[1].handler;
+                }
+
+                return body;
+            };
+
+            const serializeSubcommand = (name: string, command: CommandModule<"slash">): CommandBody => ({
+                "type": ApplicationCommandOptionType.Subcommand,
+                name,
+                "description": command[1].description,
+                "options": serializeArguments(command)
+            });
 
             const buildCommandState = async () => {
-                const loadedCommands = await readCommands("./src/commands", Date.now());
-                const registeredCommands = new Map<string, Record<string, unknown>>();
+                const loadedCommands = await readCommands(Date.now());
+                const registeredCommands = new Map<string, CommandBody>();
                 const nextHandlers = new Map<string, CommandModule[2]>();
 
-                for (const loaded of loadedCommands) {
-                    const [commandName, groupOrSubcommand, subcommand] = loaded.parts;
-                    const command = loaded.command;
+                for (const { parts, command } of loadedCommands) {
+                    const [commandName, groupOrSubcommand, subcommand] = parts;
 
-                    if (loaded.parts.length === 1) {
-                        const body: Record<string, unknown> = { "name": commandName };
+                    if (!groupOrSubcommand) {
+                        registeredCommands.set(commandName, serializeTopLevelCommand(commandName, command));
+                    } else {
+                        if (command[0] !== "slash" || parts.length > 3)
+                            throw new Error(`${parts.join("/")}: Nested commands must be slash commands with at most one subcommand group.`);
 
-                        switch (command[0]) {
-                            case "slash":
-                                body.type = ApplicationCommandType.ChatInput;
-                                body.description = command[1].description;
-                                body.options = serializeArguments(command);
-                                break;
-                            case "messageContextMenu":
-                                body.type = ApplicationCommandType.Message;
-                                break;
-                            case "userContextMenu":
-                                body.type = ApplicationCommandType.User;
-                                break;
-                            case "primaryEntry":
-                                body.type = ApplicationCommandType.PrimaryEntryPoint;
-                                if ("handler" in command[1]) body.handler = command[1].handler;
-                                break;
-                        }
-
-                        registeredCommands.set(commandName, body);
-                        nextHandlers.set(commandName, command[2]);
-                        continue;
-                    }
-
-                    if (command[0] !== "slash" || loaded.parts.length > 3)
-                        throw new Error(`${loaded.parts.join("/")}: Nested commands must be slash commands with at most one subcommand group.`);
-
-                    let body = registeredCommands.get(commandName);
-                    if (!body) {
-                        body = {
+                        const body = registeredCommands.get(commandName) ?? {
                             "name": commandName,
                             "type": ApplicationCommandType.ChatInput,
                             "description": `${commandName} commands`,
                             "options": []
                         };
                         registeredCommands.set(commandName, body);
-                    }
 
-                    const options = body.options as Record<string, unknown>[];
-                    if (loaded.parts.length === 2) {
-                        options.push({
-                            "type": ApplicationCommandOptionType.Subcommand,
-                            "name": groupOrSubcommand,
-                            "description": command[1].description,
-                            "options": serializeArguments(command)
-                        });
-                    } else {
-                        let group = options.find(option =>
-                            option.type === ApplicationCommandOptionType.SubcommandGroup &&
-                            option.name === groupOrSubcommand
-                        );
+                        const options = body.options as CommandBody[];
+                        if (!subcommand) {
+                            options.push(serializeSubcommand(groupOrSubcommand, command));
+                        } else {
+                            let group = options.find(option =>
+                                option.type === ApplicationCommandOptionType.SubcommandGroup &&
+                                option.name === groupOrSubcommand
+                            );
 
-                        if (!group) {
-                            group = {
-                                "type": ApplicationCommandOptionType.SubcommandGroup,
-                                "name": groupOrSubcommand,
-                                "description": `${groupOrSubcommand} commands`,
-                                "options": []
-                            };
-                            options.push(group);
+                            if (!group) {
+                                group = {
+                                    "type": ApplicationCommandOptionType.SubcommandGroup,
+                                    "name": groupOrSubcommand,
+                                    "description": `${groupOrSubcommand} commands`,
+                                    "options": []
+                                };
+                                options.push(group);
+                            }
+
+                            (group.options as CommandBody[])
+                                .push(serializeSubcommand(subcommand, command));
                         }
-
-                        (group.options as Record<string, unknown>[]).push({
-                            "type": ApplicationCommandOptionType.Subcommand,
-                            "name": subcommand,
-                            "description": command[1].description,
-                            "options": serializeArguments(command)
-                        });
                     }
 
-                    nextHandlers.set(loaded.parts.join("/"), command[2]);
+                    nextHandlers.set(parts.join("/"), command[2]);
                 }
 
                 return {
@@ -313,7 +316,9 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
                 const previousSpinnerText = spinner.text;
                 const wasSpinnerSpinning = spinner.isSpinning;
-                spinner.start(forcePut ? "Registering commands..." : "Reloading commands...");
+                spinner.start(
+                    `${time()} ${forcePut ? "Registering commands..." : "Reloading commands..."}`
+                );
 
                 try {
                     await rest.put(Routes.applicationCommands(env.app_id), { "body": state.body });
@@ -321,18 +326,18 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     commandSourceFingerprint = sourceFingerprint;
 
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed("Commands reloaded and registered.");
+                    else spinner.succeed(`${time()} Commands reloaded and registered.`);
                 } catch (error) {
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail("Failed to reload commands.");
+                    else spinner.fail(`${time()} Failed to reload commands.`);
                     throw error;
                 }
             };
 
-            await loadModuleGroup("commands", () => reloadCommands(true));
+            await loadModuleGroup(() => reloadCommands(true));
 
             client.on("interactionCreate", interaction => {
-                runSafely("Command interaction", () => {
+                runSafely(() => {
                     if (!interaction.isCommand()) return;
 
                     const parts = [interaction.commandName];
@@ -344,11 +349,14 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     }
 
                     const handler = handlers.get(parts.join("/"));
-                    return handler?.({ "client": cli, rest, interaction } as never);
+                    if (!handler) return;
+
+                    log(`Command: /${parts.join(" ")}`);
+                    return handler({ "client": cli, rest, interaction } as never);
                 });
             });
 
-            watchForHotReload("./src/commands", "commands", () => reloadCommands());
+            watchForHotReload("./src/commands", () => reloadCommands());
         }
 
         if (fs.existsSync("./src/events")) {
@@ -367,7 +375,9 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
                 const previousSpinnerText = spinner.text;
                 const wasSpinnerSpinning = spinner.isSpinning;
-                spinner.start(initial ? "Loading events..." : "Reloading events...");
+                spinner.start(
+                    `${time()} ${initial ? "Loading events..." : "Reloading events..."}`
+                );
 
                 try {
                     const cacheKey = Date.now();
@@ -386,7 +396,8 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                         const eventModule = module.default;
                         const eventName = eventModule[0];
                         const listener = (...eventArgs: any[]) => {
-                            runSafely(`Event "${String(eventName)}"`, () => eventModule[1]({
+                            log(`Event: ${String(eventName)}`);
+                            runSafely(() => eventModule[1]({
                                 "client": cli,
                                 rest,
                                 eventArgs,
@@ -409,16 +420,16 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     eventSourceFingerprint = sourceFingerprint;
 
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed("Events reloaded.");
+                    else spinner.succeed(`${time()} Events reloaded.`);
                 } catch (error) {
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail("Failed to reload events.");
+                    else spinner.fail(`${time()} Failed to reload events.`);
                     throw error;
                 }
             };
 
-            await loadModuleGroup("events", () => reloadEvents(true));
-            watchForHotReload("./src/events", "events", () => reloadEvents());
+            await loadModuleGroup(() => reloadEvents(true));
+            watchForHotReload("./src/events", () => reloadEvents());
         }
 
         if (fs.existsSync("./src/interactions")) {
@@ -449,7 +460,9 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
                 const previousSpinnerText = spinner.text;
                 const wasSpinnerSpinning = spinner.isSpinning;
-                spinner.start(initial ? "Loading interactions..." : "Reloading interactions...");
+                spinner.start(
+                    `${time()} ${initial ? "Loading interactions..." : "Reloading interactions..."}`
+                );
 
                 try {
                     const cacheKey = Date.now();
@@ -490,18 +503,18 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     interactionSourceFingerprint = sourceFingerprint;
 
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed("Interactions reloaded.");
+                    else spinner.succeed(`${time()} Interactions reloaded.`);
                 } catch (error) {
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail("Failed to reload interactions.");
+                    else spinner.fail(`${time()} Failed to reload interactions.`);
                     throw error;
                 }
             };
 
-            await loadModuleGroup("interactions", () => reloadInteractions(true));
+            await loadModuleGroup(() => reloadInteractions(true));
 
             client.on("interactionCreate", (interaction: Interaction) => {
-                runSafely("Interaction router", () => {
+                runSafely(() => {
                     let interactionType: InteractionModule[0] | undefined;
 
                     if (interaction.isButton()) interactionType = "button";
@@ -528,6 +541,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     if (registeredInteraction.once)
                         removeInteraction(interactionType, registeredInteraction);
 
+                    log(`Interaction: ${interactionType} (${interactionId})`);
                     return registeredInteraction.module[1]({
                         "client": cli,
                         rest,
@@ -538,7 +552,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 });
             });
 
-            watchForHotReload("./src/interactions", "interactions", () => reloadInteractions());
+            watchForHotReload("./src/interactions", () => reloadInteractions());
         }
 
         if (fs.existsSync("./src/customs")) {
@@ -575,8 +589,8 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 for (const custom of customs) {
                     if (custom.once) removeCustom(type, custom.id);
 
+                    log(`Custom: ${type} (${custom.id})`);
                     runSafely(
-                        `Custom "${type}" (${custom.id})`,
                         () => custom.module[1]({
                             "client": cli,
                             rest,
@@ -593,7 +607,9 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
                 const previousSpinnerText = spinner.text;
                 const wasSpinnerSpinning = spinner.isSpinning;
-                spinner.start(initial ? "Loading customs..." : "Reloading customs...");
+                spinner.start(
+                    `${time()} ${initial ? "Loading customs..." : "Reloading customs..."}`
+                );
 
                 try {
                     const cacheKey = Date.now();
@@ -629,17 +645,17 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     customSourceFingerprint = sourceFingerprint;
 
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed("Customs reloaded.");
+                    else spinner.succeed(`${time()} Customs reloaded.`);
 
                     if (!initial) dispatchCustom("ready");
                 } catch (error) {
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail("Failed to reload customs.");
+                    else spinner.fail(`${time()} Failed to reload customs.`);
                     throw error;
                 }
             };
 
-            await loadModuleGroup("customs", () => reloadCustoms(true));
+            await loadModuleGroup(() => reloadCustoms(true));
 
             dispatchRuntimeError = error => {
                 if ((registeredCustoms.get("error")?.length ?? 0) === 0) return false;
@@ -649,21 +665,26 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
             client.on("debug", message => dispatchCustom("djsDebug", { message }));
             client.on("warn", message => dispatchCustom("djsWarn", { message }));
-            client.on("error", error => {
+            client.on("error", err => {
                 if ((registeredCustoms.get("djsError")?.length ?? 0) > 0) {
-                    dispatchCustom("djsError", { "message": error.message });
+                    dispatchCustom("djsError", { "message": err.message });
                     return;
                 }
 
-                console.error(("Discord.js error: " + (error.stack ?? error.message)).red);
+                error(err);
             });
             process.once("exit", code => dispatchCustom("exit", { code }));
 
             dispatchCustomReady = () => dispatchCustom("ready");
-            watchForHotReload("./src/customs", "customs", () => reloadCustoms());
+            watchForHotReload("./src/customs", () => reloadCustoms());
         }
 
-        spinner.succeed("Logged in as " + `${cli.user.username}#${cli.user.discriminator}`.white.bold + "!" + ` (${Date.now() - now}ms)`.dim);
+        spinner.succeed(
+            `${time()} Logged in as ` +
+            `${cli.user.username}#${cli.user.discriminator}`.white.bold +
+            "!" +
+            ` (${Date.now() - now}ms)`.dim
+        );
         dispatchCustomReady?.();
     } catch (e) {
         spinner.stop();
