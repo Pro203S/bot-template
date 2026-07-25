@@ -22,14 +22,22 @@ const timeFormat = new Intl.DateTimeFormat("sv-SE", {
 
 const time = () => `[${timeFormat.format(new Date())}]`.white.dim;
 
-const log = (message: string) => console.log(`${time()} ${message}`);
+const mainFile = "index.ts";
 
-const error = (err: unknown) => {
+const log = (file: string, content: string) =>
+    console.log(`  ${time()} ${file} ${content}`);
+
+const error = (err: unknown, file = mainFile) => {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`${time()} ${`Error: ${message}`.red}`);
+    console.error(`${time()} ${file} ${`Error: ${message}`.red}`);
 
-    if (err instanceof Error && err.stack)
-        console.error(`${time()} ${err.stack.gray}`);
+    if (err instanceof Error && err.stack) {
+        const stack = err.stack
+            .split("\n")
+            .map(line => `${time()} ${file} ${line.gray}`)
+            .join("\n");
+        console.error(stack);
+    }
 };
 
 const handleError = (err: unknown) => {
@@ -71,7 +79,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
 (async () => {
     const now = Date.now();
-    const spinner = ora().start(`${time()} Starting...`);
+    const spinner = ora().start(`${time()} ${mainFile} Starting...`);
 
     try {
         if (!fs.existsSync("discord-env.ts")) throw new Error("Could not find discord-env.ts. Did you place it in the project root?");
@@ -145,8 +153,13 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
         if (fs.existsSync("./src/commands")) {
             type LoadedCommand = {
+                file: string;
                 parts: [string, ...string[]];
                 command: CommandModule;
+            };
+            type CommandHandler = {
+                file: string;
+                run: CommandModule[2];
             };
             type CommandBody = Record<string, unknown>;
 
@@ -192,6 +205,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     if (!commandName) throw new Error(`${relativePath}: Command name cannot be empty.`);
 
                     return {
+                        "file": relativePath.split(path.sep).join("/"),
                         "parts": [commandName, ...parts],
                         "command": module.default
                     };
@@ -240,9 +254,9 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
             const buildCommandState = async () => {
                 const loadedCommands = await readCommands(Date.now());
                 const registeredCommands = new Map<string, CommandBody>();
-                const nextHandlers = new Map<string, CommandModule[2]>();
+                const nextHandlers = new Map<string, CommandHandler>();
 
-                for (const { parts, command } of loadedCommands) {
+                for (const { file, parts, command } of loadedCommands) {
                     const [commandName, groupOrSubcommand, subcommand] = parts;
 
                     if (!groupOrSubcommand) {
@@ -283,7 +297,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                         }
                     }
 
-                    nextHandlers.set(parts.join("/"), command[2]);
+                    nextHandlers.set(parts.join("/"), { file, "run": command[2] });
                 }
 
                 return {
@@ -297,7 +311,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 };
             };
 
-            let handlers = new Map<string, CommandModule[2]>();
+            let handlers = new Map<string, CommandHandler>();
             let registeredCommandInfo = "";
             let commandSourceFingerprint = "";
 
@@ -317,7 +331,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 const previousSpinnerText = spinner.text;
                 const wasSpinnerSpinning = spinner.isSpinning;
                 spinner.start(
-                    `${time()} ${forcePut ? "Registering commands..." : "Reloading commands..."}`
+                    `${time()} ${mainFile} ${forcePut ? "Registering commands..." : "Reloading commands..."}`
                 );
 
                 try {
@@ -326,10 +340,10 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     commandSourceFingerprint = sourceFingerprint;
 
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed(`${time()} Commands reloaded and registered.`);
+                    else spinner.succeed(`${time()} ${mainFile} Commands reloaded and registered.`);
                 } catch (error) {
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail(`${time()} Failed to reload commands.`);
+                    else spinner.fail(`${time()} ${mainFile} Failed to reload commands.`);
                     throw error;
                 }
             };
@@ -351,8 +365,8 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     const handler = handlers.get(parts.join("/"));
                     if (!handler) return;
 
-                    log(`Command: /${parts.join(" ")}`);
-                    return handler({ "client": cli, rest, interaction } as never);
+                    log(handler.file, `Command: /${parts.join(" ")}`);
+                    return handler.run({ "client": cli, rest, interaction } as never);
                 });
             });
 
@@ -376,7 +390,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 const previousSpinnerText = spinner.text;
                 const wasSpinnerSpinning = spinner.isSpinning;
                 spinner.start(
-                    `${time()} ${initial ? "Loading events..." : "Reloading events..."}`
+                    `${time()} ${mainFile} ${initial ? "Loading events..." : "Reloading events..."}`
                 );
 
                 try {
@@ -390,13 +404,15 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                             "once"?: boolean;
                         } = await import(getSourceImportPath(modulePath, cacheKey));
 
+                        const file = path.relative("./src/events", modulePath)
+                            .split(path.sep).join("/");
                         if (!module.default)
-                            throw new Error(`${path.relative("./src/events", modulePath)}: Expected the default export to be an EventModule tuple.`);
+                            throw new Error(`${file}: Expected the default export to be an EventModule tuple.`);
 
                         const eventModule = module.default;
                         const eventName = eventModule[0];
                         const listener = (...eventArgs: any[]) => {
-                            log(`Event: ${String(eventName)}`);
+                            log(file, `Event: ${String(eventName)}`);
                             runSafely(() => eventModule[1]({
                                 "client": cli,
                                 rest,
@@ -420,10 +436,10 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     eventSourceFingerprint = sourceFingerprint;
 
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed(`${time()} Events reloaded.`);
+                    else spinner.succeed(`${time()} ${mainFile} Events reloaded.`);
                 } catch (error) {
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail(`${time()} Failed to reload events.`);
+                    else spinner.fail(`${time()} ${mainFile} Failed to reload events.`);
                     throw error;
                 }
             };
@@ -434,6 +450,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
         if (fs.existsSync("./src/interactions")) {
             type RegisteredInteraction = {
+                "file": string;
                 "customId": string;
                 "matches": (customId: string) => boolean;
                 "module": InteractionModule;
@@ -461,7 +478,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 const previousSpinnerText = spinner.text;
                 const wasSpinnerSpinning = spinner.isSpinning;
                 spinner.start(
-                    `${time()} ${initial ? "Loading interactions..." : "Reloading interactions..."}`
+                    `${time()} ${mainFile} ${initial ? "Loading interactions..." : "Reloading interactions..."}`
                 );
 
                 try {
@@ -477,7 +494,8 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                             "once"?: boolean;
                         } = await import(getSourceImportPath(modulePath, cacheKey));
 
-                        const relativePath = path.relative("./src/interactions", modulePath);
+                        const relativePath = path.relative("./src/interactions", modulePath)
+                            .split(path.sep).join("/");
                         if (!module.default)
                             throw new Error(`${relativePath}: Expected the default export to be an InteractionModule tuple.`);
                         if (!module.customId)
@@ -491,6 +509,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
 
                         const interactions = nextInteractions.get(type) ?? [];
                         interactions.push({
+                            "file": relativePath,
                             "customId": module.customId,
                             "matches": wildcardMatch(module.customId, false),
                             "module": module.default,
@@ -503,10 +522,10 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     interactionSourceFingerprint = sourceFingerprint;
 
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed(`${time()} Interactions reloaded.`);
+                    else spinner.succeed(`${time()} ${mainFile} Interactions reloaded.`);
                 } catch (error) {
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail(`${time()} Failed to reload interactions.`);
+                    else spinner.fail(`${time()} ${mainFile} Failed to reload interactions.`);
                     throw error;
                 }
             };
@@ -541,7 +560,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     if (registeredInteraction.once)
                         removeInteraction(interactionType, registeredInteraction);
 
-                    log(`Interaction: ${interactionType} (${interactionId})`);
+                    log(registeredInteraction.file, `Interaction: ${interactionType} (${interactionId})`);
                     return registeredInteraction.module[1]({
                         "client": cli,
                         rest,
@@ -589,7 +608,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 for (const custom of customs) {
                     if (custom.once) removeCustom(type, custom.id);
 
-                    log(`Custom: ${type} (${custom.id})`);
+                    log(custom.id, `Custom: ${type}`);
                     runSafely(
                         () => custom.module[1]({
                             "client": cli,
@@ -608,7 +627,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                 const previousSpinnerText = spinner.text;
                 const wasSpinnerSpinning = spinner.isSpinning;
                 spinner.start(
-                    `${time()} ${initial ? "Loading customs..." : "Reloading customs..."}`
+                    `${time()} ${mainFile} ${initial ? "Loading customs..." : "Reloading customs..."}`
                 );
 
                 try {
@@ -645,12 +664,12 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
                     customSourceFingerprint = sourceFingerprint;
 
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.succeed(`${time()} Customs reloaded.`);
+                    else spinner.succeed(`${time()} ${mainFile} Customs reloaded.`);
 
                     if (!initial) dispatchCustom("ready");
                 } catch (error) {
                     if (wasSpinnerSpinning) spinner.text = previousSpinnerText;
-                    else spinner.fail(`${time()} Failed to reload customs.`);
+                    else spinner.fail(`${time()} ${mainFile} Failed to reload customs.`);
                     throw error;
                 }
             };
@@ -680,7 +699,7 @@ const getSourceImportPath = (modulePath: string, cacheKey: number) =>
         }
 
         spinner.succeed(
-            `${time()} Logged in as ` +
+            `${time()} ${mainFile} Logged in as ` +
             `${cli.user.username}#${cli.user.discriminator}`.white.bold +
             "!" +
             ` (${Date.now() - now}ms)`.dim
